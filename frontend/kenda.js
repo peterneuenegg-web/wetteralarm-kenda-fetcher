@@ -202,18 +202,35 @@ async function loadGrid(hour, param) {
     const key = `${hour}_${param}`;
     if (state.cachedGrids[key]) return state.cachedGrids[key];
 
-    const ts = hour.replace(/[-:]/g, '').replace('T', 'T').slice(0, 13); // YYYYMMDDTHHMM
-    // index hour ist 'YYYY-MM-DDTHH:MM:SSZ' → 'YYYYMMDDTHHMM'
+    // hour ist 'YYYY-MM-DDTHH:MM:SSZ' → 'YYYYMMDDTHHMM'
     const compact = hour.replace(/-/g, '').replace(/:/g, '').slice(0, 13);
     const url = `${DATA_BASE}/${compact}_${param}.json?ts=${Date.now()}`;
 
+    console.log('[kenda] loadGrid', { hour, param, url });
     try {
         const r = await fetch(url);
-        if (!r.ok) return null;
+        if (!r.ok) {
+            console.error('[kenda] HTTP', r.status, url);
+            return null;
+        }
         const grid = await r.json();
+        if (!grid.values || !Array.isArray(grid.values) || !grid.values.length) {
+            console.error('[kenda] invalid grid format', grid);
+            return null;
+        }
+        const flatCount = grid.values.length * grid.values[0].length;
+        const numericCount = grid.values.flat().filter(v => v !== null).length;
+        console.log('[kenda] loaded', {
+            shape: grid.shape,
+            bbox: [grid.lat_min, grid.lng_min, grid.lat_max, grid.lng_max],
+            scale: grid.scale,
+            cellsTotal: flatCount,
+            cellsWithValue: numericCount,
+        });
         state.cachedGrids[key] = grid;
         return grid;
     } catch (e) {
+        console.error('[kenda] fetch error', url, e);
         return null;
     }
 }

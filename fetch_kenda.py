@@ -81,6 +81,17 @@ RELEVANT_PARAMS = {
     },
 }
 
+# KENDA publiziert unterschiedlich, je nach Aggregationstyp:
+#  - Constant-Variablen (CAPE_ML, DBZ_CMAX) → lead=0 (Analyse)
+#  - Stündliche Aggregate (VMAX_10M = max/1h, TOT_PREC = sum/1h) → lead=1 (First Guess)
+# Wir akzeptieren pro Parameter genau den richtigen Lead.
+PARAM_LEAD = {
+    "vmax_10m": 1,
+    "tot_prec": 1,
+    "cape_ml":  0,
+    "dbz_cmax": 0,
+}
+
 CH_BBOX = (5.8, 45.7, 10.6, 47.9)  # lng_min, lat_min, lng_max, lat_max
 GRID_RES_DEG = 0.01                # ≈ 1.1 km bei 47°N
 
@@ -218,7 +229,8 @@ def fetch_stac_items(lookback_hours: int) -> list[StacItem]:
                 continue
             if m.group("member") != "ctrl":
                 continue
-            if int(m.group("lead")) != 0:
+            expected_lead = PARAM_LEAD.get(param, 0)
+            if int(m.group("lead")) != expected_lead:
                 continue
 
             iso = feat.get("properties", {}).get("datetime")
@@ -345,11 +357,12 @@ def write_layer_json(
     return path
 
 
-def write_index(out_dir: Path, hours: list[datetime]) -> Path:
+def write_index(out_dir: Path, hours: list[datetime], params_written: set[str]) -> Path:
+    """Nur Parameter ins Index aufnehmen, für die wir tatsächlich JSON erzeugt haben."""
     payload = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "bbox": list(CH_BBOX),
-        "params": {p: RELEVANT_PARAMS[p] for p in RELEVANT_PARAMS},
+        "params": {p: RELEVANT_PARAMS[p] for p in RELEVANT_PARAMS if p in params_written},
         "hours": [h.strftime("%Y-%m-%dT%H:%M:%SZ") for h in sorted(hours)],
     }
     path = out_dir / "index.json"
@@ -471,6 +484,7 @@ def main():
         # 4) Pro Item: download, mask, regrid, json
         success_files: list[Path] = []
         hours_seen: set[datetime] = set()
+        params_written: set[str] = set()
 
         for item in sorted(items, key=lambda x: (x.timestamp, x.param)):
             grib_path = tmp / f"{item.item_id}.grib2"
@@ -494,12 +508,14 @@ def main():
             json_path = write_layer_json(out_dir, item.timestamp, item.param, grid, lats_1d, lngs_1d)
             success_files.append(json_path)
             hours_seen.add(item.timestamp)
+            params_written.add(item.param)
 
         if not success_files:
             log.error("No successful conversions")
             return 1
 
-        index_path = write_index(out_dir, list(hours_seen))
+        log.info("Layers written: %s", sorted(params_written))
+        index_path = write_index(out_dir, list(hours_seen), params_written)
         success_files.append(index_path)
 
         log.info("Uploading %d files via SFTP", len(success_files))
