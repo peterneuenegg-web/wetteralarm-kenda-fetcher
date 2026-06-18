@@ -118,37 +118,17 @@ def fetch_horizontal_constants_url() -> str:
     raise RuntimeError("horizontal_constants asset not found in STAC")
 
 
-def read_grib_values_by_shortname(grib_path: Path, short_names: list[str]) -> dict[str, np.ndarray]:
-    """
-    Liest einzelne 1D-Wertearrays aus einem Multi-Message-GRIB2 anhand des
-    GRIB-shortName (z.B. 'CLAT', 'CLON').
-
-    cfgrib öffnet die Datei mehrmals mit filter_by_keys, weil ICON-CLAT/CLON
-    unterschiedliche Grids deklarieren als die Daten — Standard-Open würde
-    fehlschlagen.
-    """
-    out: dict[str, np.ndarray] = {}
-    for short in short_names:
-        ds = xr.open_dataset(
-            grib_path,
-            engine="cfgrib",
-            backend_kwargs={
-                "indexpath": "",
-                "filter_by_keys": {"shortName": short},
-            },
-        )
-        data_vars = list(ds.data_vars)
-        if not data_vars:
-            log.error("shortName %s not found in %s", short, grib_path.name)
-            continue
-        arr = ds[data_vars[0]].values.astype(np.float64).ravel()
-        out[short] = arr
-        log.info("  %s: %d cells", short, arr.size)
-    return out
-
-
 def load_mesh(tmp_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Lädt das KENDA-Mesh und gibt (clat, clon) als 1D-Arrays zurück (Grad)."""
+    """
+    Lädt das KENDA-Mesh und liefert (clat, clon) als 1D-Arrays in Grad.
+
+    Geht über die eccodes-Python-API direkt durch alle GRIB-Messages, weil
+    cfgrib's Filter-by-shortName empfindlich auf die exakte Schreibweise und
+    die Konsistenz der Grid-Definitionen reagiert. Hier iterieren wir
+    schlicht und nehmen das, was als latitude/longitude erkennbar ist.
+    """
+    import eccodes  # bringt cfgrib mit
+
     url = fetch_horizontal_constants_url()
     path = tmp_dir / HORIZONTAL_CONSTANTS_ASSET
     log.info("Downloading horizontal_constants (~11 MB) …")
@@ -158,13 +138,57 @@ def load_mesh(tmp_dir: Path) -> tuple[np.ndarray, np.ndarray]:
             for chunk in r.iter_content(chunk_size=1 << 16):
                 if chunk:
                     f.write(chunk)
-    data = read_grib_values_by_shortname(path, ["CLAT", "CLON"])
-    clat = data.get("CLAT")
-    clon = data.get("CLON")
+
+    # Erkennungs-Heuristik: case-insensitive Match auf bekannte ICON-Namen.
+    lat_candidates = {"clat", "rlat", "latitude", "lat"}
+    lon_candidates = {"clon", "rlon", "longitude", "lon"}
+
+    clat: np.ndarray | None = None
+    clon: np.ndarray | None = None
+    seen: list[str] = []
+
+    with path.open("rb") as f:
+        while True:
+            gid = eccodes.codes_grib_new_from_file(f)
+            if gid is None:
+                break
+            try:
+                short = eccodes.codes_get(gid, "shortName")
+                name = eccodes.codes_get(gid, "name") if eccodes.codes_is_defined(gid, "name") else ""
+                seen.append(f"{short} ({name})")
+                short_lc = short.lower()
+                if clat is None and short_lc in lat_candidates:
+                    clat = np.asarray(eccodes.codes_get_array(gid, "values"), dtype=np.float64)
+                    log.info("  Found CLAT via shortName=%r (%d cells)", short, clat.size)
+                elif clon is None and short_lc in lon_candidates:
+                    clon = np.asarray(eccodes.codes_get_array(gid, "values"), dtype=np.float64)
+                    log.info("  Found CLON via shortName=%r (%d cells)", short, clon.size)
+            finally:
+                eccodes.codes_release(gid)
+
+    log.info("GRIB messages in horizontal_constants: %s", "; ".join(seen) if seen else "(none)")
+
     if clat is None or clon is None:
-        raise RuntimeError("CLAT/CLON missing in horizontal_constants")
+        raise RuntimeError(
+            f"CLAT/CLON not found via shortName heuristic. "
+            f"Seen shortNames: {[s.split(' ')[0] for s in seen]}"
+        )
+
+    # Manche ICON-Outputs liefern Radians statt Grad. Plausibilitäts-Check:
+    # Werte im Bereich [-π, π] → Radians → in Grad konvertieren.
+    if np.nanmax(np.abs(clat)) <= np.pi + 0.01:
+        log.info("  CLAT values look like radians (max=%.3f), converting to degrees", np.nanmax(np.abs(clat)))
+        clat = np.degrees(clat)
+    if np.nanmax(np.abs(clon)) <= np.pi + 0.01:
+        log.info("  CLON values look like radians (max=%.3f), converting to degrees", np.nanmax(np.abs(clon)))
+        clon = np.degrees(clon)
+
     if clat.size != clon.size:
         raise RuntimeError(f"CLAT/CLON size mismatch: {clat.size} vs {clon.size}")
+
+    log.info("  CLAT range: %.3f .. %.3f", float(np.nanmin(clat)), float(np.nanmax(clat)))
+    log.info("  CLON range: %.3f .. %.3f", float(np.nanmin(clon)), float(np.nanmax(clon)))
+
     path.unlink(missing_ok=True)
     return clat, clon
 
