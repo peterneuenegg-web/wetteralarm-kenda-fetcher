@@ -140,8 +140,9 @@ def load_mesh(tmp_dir: Path) -> tuple[np.ndarray, np.ndarray]:
                     f.write(chunk)
 
     # Erkennungs-Heuristik: case-insensitive Match auf bekannte ICON-Namen.
-    lat_candidates = {"clat", "rlat", "latitude", "lat"}
-    lon_candidates = {"clon", "rlon", "longitude", "lon"}
+    # KENDA-CH1 verwendet `tlat`/`tlon` (Latitude/Longitude on T grid).
+    lat_candidates = {"tlat", "clat", "rlat", "latitude", "lat"}
+    lon_candidates = {"tlon", "clon", "rlon", "longitude", "lon"}
 
     clat: np.ndarray | None = None
     clon: np.ndarray | None = None
