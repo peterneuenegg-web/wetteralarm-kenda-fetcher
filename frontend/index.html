@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KENDA-CH1 PoC — Schadens-Plausibilisierung</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="kenda.css">
+</head>
+<body>
+    <div id="header">
+        <div class="title">KENDA-CH1 Gitterdaten-PoC</div>
+        <div class="subtitle">1 km Auflösung · stündliche Analyse · MeteoSchweiz Open Data CC-BY</div>
+    </div>
+
+    <div id="controls">
+        <label>Layer:
+            <select id="layer-select"></select>
+        </label>
+        <label>Stunde:
+            <input type="range" id="hour-slider" min="0" max="0" step="1" value="0">
+            <span id="hour-label">—</span>
+        </label>
+        <span id="status"></span>
+    </div>
+
+    <div id="map"></div>
+
+    <div id="legend">
+        <span id="scale-min">—</span>
+        <div id="scale-bar"></div>
+        <span id="scale-max">—</span>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="kenda.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.grib2
+*.idx
+*.parquet
+*.json.gz
+data/
+.venv/
+.env
+.env.*
+!.env.example

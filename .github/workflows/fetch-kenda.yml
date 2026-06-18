@@ -1,0 +1,45 @@
+name: fetch-kenda
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  schedule:
+    # Stündlich, 15 Min nach voller Stunde (KENDA publiziert i.d.R. ~30 Min nach
+    # Stundenende). GitHub-Cron ist best-effort; LOOKBACK_HOURS deckt Lücken ab.
+    - cron: "15 * * * *"
+  workflow_dispatch:
+    inputs:
+      lookback_hours:
+        description: "Wie viele Stunden zurück (Default 24)"
+        required: false
+        default: "24"
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install system deps (eccodes)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes0
+
+      - name: Install python deps
+        run: pip install -r requirements.txt
+
+      - name: Fetch + upload
+        env:
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_USER: ${{ secrets.SFTP_USER }}
+          SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
+          SFTP_REMOTE_DIR: ${{ secrets.SFTP_REMOTE_DIR }}
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
+        run: python fetch_kenda.py
