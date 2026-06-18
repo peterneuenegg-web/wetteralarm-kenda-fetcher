@@ -370,19 +370,55 @@ def upload_sftp(local_files: list[Path], remote_dir: str) -> bool:
     transport.connect(username=user, password=pwd)
     sftp = paramiko.SFTPClient.from_transport(transport)
     try:
-        parts = remote_dir.strip("/").split("/")
-        current = ""
-        for p in parts:
-            current = current + "/" + p
-            try:
-                sftp.stat(current)
-            except FileNotFoundError:
-                sftp.mkdir(current)
+        # Diagnose: was sieht der User nach Login? Hilft, den richtigen
+        # SFTP_REMOTE_DIR zu finden (chroot vs. absoluter Pfad).
+        try:
+            cwd = sftp.getcwd() or sftp.normalize(".")
+            log.info("SFTP login cwd: %s", cwd)
+        except Exception as e:
+            log.info("SFTP cwd unknown (%s)", e)
+        try:
+            entries = sorted(sftp.listdir("."))
+            log.info("SFTP top-level entries (%d): %s", len(entries), ", ".join(entries[:30]))
+        except Exception as e:
+            log.warning("SFTP listdir failed: %s", e)
 
+        # Pfad-Navigation: erst absoluten Pfad probieren, sonst relativ vom
+        # Login-Cwd aus. Detaillierte Fehlermeldung bei Permission-Issues.
+        is_absolute = remote_dir.startswith("/")
+        parts = remote_dir.strip("/").split("/")
+        current = "" if is_absolute else "."
+        for p in parts:
+            next_path = (current + "/" + p) if is_absolute else (current + "/" + p if current != "." else p)
+            try:
+                sftp.stat(next_path)
+                log.info("  exists: %s", next_path)
+            except FileNotFoundError:
+                try:
+                    sftp.mkdir(next_path)
+                    log.info("  mkdir : %s", next_path)
+                except OSError as e:
+                    log.error(
+                        "  Cannot mkdir %s: %s. "
+                        "Hinweis: SFTP_REMOTE_DIR ist ggf. ausserhalb des Chroot-Bereichs. "
+                        "Vergleiche den Wert mit der Top-Level-Listing oben.",
+                        next_path, e,
+                    )
+                    raise
+            except OSError as e:
+                log.error(
+                    "  Cannot stat %s: %s. "
+                    "Hinweis: vermutlich Chroot-Grenze überschritten — relative Pfade probieren.",
+                    next_path, e,
+                )
+                raise
+            current = next_path
+
+        target_dir = current
         for f in local_files:
-            remote = f"{remote_dir.rstrip('/')}/{f.name}"
-            log.info("  PUT %s → %s", f.name, remote)
+            remote = f"{target_dir.rstrip('/')}/{f.name}"
             sftp.put(str(f), remote)
+        log.info("Uploaded %d files to %s", len(local_files), target_dir)
         return True
     finally:
         sftp.close()
