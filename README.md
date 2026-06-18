@@ -15,10 +15,16 @@ wir die Konversion in GitHub Actions und liefern dem Schaden-Tool fertige JSON.
 
 1. GitHub Actions triggert stündlich (`15 * * * *`)
 2. Python-Skript queryt STAC, filtert auf 4 Parameter × `ctrl`-Member × `lead=0`
-3. Lädt GRIB2-Files, parst via `cfgrib` + `xarray`
-4. Schneidet auf Schweiz-Bbox `[5.8, 45.7, 10.6, 47.9]`
-5. Schreibt pro Stunde × Layer eine JSON-Datei + eine `index.json`
-6. SFTP-Upload nach `widget.wetteralarm.ch:/web-scripts/kenda-poc/data/`
+3. Lädt **einmal** das Mesh-File `horizontal_constants_kenda-ch1.grib2` (~11 MB)
+   — KENDA-CH1 nutzt ein triangulares ICON-Mesh ohne eingebettete Lat/Lon.
+   `CLAT`/`CLON` aus diesem File liefern die Zell-Koordinaten in Grad.
+4. Berechnet eine Maske: welche Mesh-Zellen liegen in der Schweiz-Bbox
+   `[5.8, 45.7, 10.6, 47.9]` (~78 000 von 1 Mio Zellen)
+5. Pro Daten-GRIB: liest die 1D-Werte (eine Zahl je Mesh-Zelle), filtert auf
+   CH-Zellen, interpoliert via `scipy.griddata` auf reguläres 0.01°-Gitter
+   (≈ 1.1 km Auflösung)
+6. Schreibt pro Stunde × Layer eine JSON-Datei + eine `index.json`
+7. SFTP-Upload nach `widget.wetteralarm.ch:/web-scripts/kenda-poc/data/`
 
 ## Parameter
 

@@ -3,18 +3,22 @@
 KENDA-CH1 PoC fetcher.
 
 Pollt die STAC-Collection ch.meteoschweiz.ogd-analysis-kenda-ch1, lädt die
-GRIB2-Files für die schaden-relevanten Parameter herunter, schneidet auf die
-Schweiz-Bbox und schreibt pro Stunde × Layer eine kompakte JSON-Datei.
+GRIB2-Files für die schaden-relevanten Parameter herunter und schreibt pro
+Stunde × Layer eine kompakte JSON-Datei.
 
-Die JSON-Files werden anschliessend per SFTP nach widget.wetteralarm.ch
-hochgeladen, von wo sie die statische PoC-Karte ausliest.
+KENDA-CH1 benutzt ein triangulares ICON-Mesh (`unstructured_grid`), kein
+reguläres Lat/Lon-Gitter. Die Zell-Koordinaten (CLAT, CLON) stehen im
+Collection-Asset `horizontal_constants_kenda-ch1.grib2` (~11 MB, statisch).
+Wir laden das einmal pro Worker-Run, maskieren auf die Schweiz-Bbox und
+interpolieren die Werte via scipy.griddata auf ein reguläres 0.01°-Gitter
+(≈ 1.1 km). Das Output-JSON bleibt kompatibel mit der statischen Karte.
 
 Env-Variablen (via GitHub Secrets):
   SFTP_HOST           — z.B. widget.wetteralarm.ch
   SFTP_USER           — SFTP-Login
   SFTP_PASSWORD       — SFTP-Passwort
   SFTP_REMOTE_DIR     — z.B. /web-scripts/kenda-poc/data
-  LOOKBACK_HOURS      — optional, default 24 (wie weit zurück in STAC geschaut wird)
+  LOOKBACK_HOURS      — optional, default 24
 
 Exit-Code:
   0  alle Stunden erfolgreich oder nichts Neues
@@ -36,6 +40,7 @@ from pathlib import Path
 import numpy as np
 import requests
 import xarray as xr
+from scipy.interpolate import griddata
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,10 +53,11 @@ STAC_COLLECTION = "ch.meteoschweiz.ogd-analysis-kenda-ch1"
 STAC_ITEMS_URL = (
     f"https://data.geo.admin.ch/api/stac/v1/collections/{STAC_COLLECTION}/items"
 )
+COLLECTION_ASSETS_URL = (
+    f"https://data.geo.admin.ch/api/stac/v1/collections/{STAC_COLLECTION}/assets"
+)
+HORIZONTAL_CONSTANTS_ASSET = "horizontal_constants_kenda-ch1.grib2"
 
-# Schaden-relevante Parameter für den PoC.
-# Mapping: STAC-Parameter-Code → (Anzeige-Label, Einheit, GRIB-Variable, Default-Skala)
-# Skala-Format: (min, mid, max) für die Heatmap-Farbskala im Frontend
 RELEVANT_PARAMS = {
     "vmax_10m": {
         "label": "Wind-Böenspitze 10 m",
@@ -75,11 +81,9 @@ RELEVANT_PARAMS = {
     },
 }
 
-# Schweiz-Bbox (lng_min, lat_min, lng_max, lat_max)
-# Etwas grosszügig, damit alle Anrainer-Gebiete drin sind.
-CH_BBOX = (5.8, 45.7, 10.6, 47.9)
+CH_BBOX = (5.8, 45.7, 10.6, 47.9)  # lng_min, lat_min, lng_max, lat_max
+GRID_RES_DEG = 0.01                # ≈ 1.1 km bei 47°N
 
-# Item-ID-Pattern: 06172026-0900-0-vmax_10m-ctrl-XXXXXXX
 ITEM_ID_RE = re.compile(
     r"^(?P<date>\d{8})-(?P<hhmm>\d{4})-(?P<lead>\d+)-(?P<param>[a-z0-9_]+)-(?P<member>[a-z]+)",
 )
@@ -101,8 +105,75 @@ def require_env(name: str) -> str:
     return v
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Mesh laden — einmalig pro Worker-Run
+# ────────────────────────────────────────────────────────────────────────────
+
+def fetch_horizontal_constants_url() -> str:
+    r = requests.get(COLLECTION_ASSETS_URL, timeout=30)
+    r.raise_for_status()
+    for a in r.json().get("assets", []):
+        if a.get("id") == HORIZONTAL_CONSTANTS_ASSET:
+            return a["href"]
+    raise RuntimeError("horizontal_constants asset not found in STAC")
+
+
+def read_grib_values_by_shortname(grib_path: Path, short_names: list[str]) -> dict[str, np.ndarray]:
+    """
+    Liest einzelne 1D-Wertearrays aus einem Multi-Message-GRIB2 anhand des
+    GRIB-shortName (z.B. 'CLAT', 'CLON').
+
+    cfgrib öffnet die Datei mehrmals mit filter_by_keys, weil ICON-CLAT/CLON
+    unterschiedliche Grids deklarieren als die Daten — Standard-Open würde
+    fehlschlagen.
+    """
+    out: dict[str, np.ndarray] = {}
+    for short in short_names:
+        ds = xr.open_dataset(
+            grib_path,
+            engine="cfgrib",
+            backend_kwargs={
+                "indexpath": "",
+                "filter_by_keys": {"shortName": short},
+            },
+        )
+        data_vars = list(ds.data_vars)
+        if not data_vars:
+            log.error("shortName %s not found in %s", short, grib_path.name)
+            continue
+        arr = ds[data_vars[0]].values.astype(np.float64).ravel()
+        out[short] = arr
+        log.info("  %s: %d cells", short, arr.size)
+    return out
+
+
+def load_mesh(tmp_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Lädt das KENDA-Mesh und gibt (clat, clon) als 1D-Arrays zurück (Grad)."""
+    url = fetch_horizontal_constants_url()
+    path = tmp_dir / HORIZONTAL_CONSTANTS_ASSET
+    log.info("Downloading horizontal_constants (~11 MB) …")
+    with requests.get(url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with path.open("wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                if chunk:
+                    f.write(chunk)
+    data = read_grib_values_by_shortname(path, ["CLAT", "CLON"])
+    clat = data.get("CLAT")
+    clon = data.get("CLON")
+    if clat is None or clon is None:
+        raise RuntimeError("CLAT/CLON missing in horizontal_constants")
+    if clat.size != clon.size:
+        raise RuntimeError(f"CLAT/CLON size mismatch: {clat.size} vs {clon.size}")
+    path.unlink(missing_ok=True)
+    return clat, clon
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Daten verarbeiten
+# ────────────────────────────────────────────────────────────────────────────
+
 def fetch_stac_items(lookback_hours: int) -> list[StacItem]:
-    """Holt alle STAC-Items der letzten N Stunden für die 4 Ziel-Parameter."""
     items: list[StacItem] = []
     next_url = STAC_ITEMS_URL + "?limit=500"
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
@@ -120,10 +191,8 @@ def fetch_stac_items(lookback_hours: int) -> list[StacItem]:
             param = m.group("param")
             if param not in RELEVANT_PARAMS:
                 continue
-            # Nur Control-Run (ctrl), keine Ensemble-Mitglieder
             if m.group("member") != "ctrl":
                 continue
-            # Nur Analyse (lead=0), keine First-Guess (lead>0)
             if int(m.group("lead")) != 0:
                 continue
 
@@ -134,7 +203,6 @@ def fetch_stac_items(lookback_hours: int) -> list[StacItem]:
             if ts < cutoff:
                 continue
 
-            # Asset-URL holen (erstes Asset, da nur eins pro Item)
             assets = feat.get("assets", {})
             asset = next(iter(assets.values()), None)
             if not asset or "href" not in asset:
@@ -149,7 +217,6 @@ def fetch_stac_items(lookback_hours: int) -> list[StacItem]:
                 )
             )
 
-        # Pagination
         next_url = None
         for link in body.get("links", []):
             if link.get("rel") == "next":
@@ -161,7 +228,6 @@ def fetch_stac_items(lookback_hours: int) -> list[StacItem]:
 
 
 def download_grib(url: str, dest: Path) -> bool:
-    """Lädt eine GRIB2-Datei nach `dest`. True bei Erfolg."""
     try:
         with requests.get(url, stream=True, timeout=120) as r:
             r.raise_for_status()
@@ -175,84 +241,86 @@ def download_grib(url: str, dest: Path) -> bool:
         return False
 
 
-def grib_to_grid(grib_path: Path, bbox: tuple) -> dict | None:
-    """
-    Liest die GRIB2-Datei via cfgrib, schneidet auf die Bbox und liefert
-    ein kompaktes Dict mit den Werten als 2D-Float32-Array.
-    """
+def read_values_1d(grib_path: Path) -> np.ndarray | None:
+    """Liest das 1D-Wertearray (eine Zahl pro Mesh-Zelle) aus dem Daten-GRIB."""
     try:
         ds = xr.open_dataset(
             grib_path,
             engine="cfgrib",
-            backend_kwargs={"indexpath": ""},  # keine .idx-Files schreiben
+            backend_kwargs={"indexpath": ""},
         )
     except Exception as e:
         log.error("Open GRIB failed: %s", e)
         return None
-
-    # Erste Daten-Variable rausziehen
-    data_vars = [v for v in ds.data_vars if v not in ("step", "time")]
+    data_vars = list(ds.data_vars)
     if not data_vars:
         log.error("No data variables in %s", grib_path.name)
         return None
-    var = ds[data_vars[0]]
-
-    # Koordinaten finden (KENDA-CH1 nutzt lat/lon, manchmal x/y)
-    lat_name = next((c for c in var.dims if c.lower() in ("latitude", "lat", "y")), None)
-    lon_name = next((c for c in var.dims if c.lower() in ("longitude", "lon", "x")), None)
-    if not (lat_name and lon_name):
-        log.error("Unknown coord names: %s", list(var.dims))
-        return None
-
-    lats = ds[lat_name].values
-    lons = ds[lon_name].values
-
-    # Bbox-Slice
-    lng_min, lat_min, lng_max, lat_max = bbox
-    lat_idx = np.where((lats >= lat_min) & (lats <= lat_max))[0]
-    lon_idx = np.where((lons >= lng_min) & (lons <= lng_max))[0]
-    if not len(lat_idx) or not len(lon_idx):
-        log.error("Empty bbox slice for %s", grib_path.name)
-        return None
-
-    arr = var.values[..., lat_idx[0] : lat_idx[-1] + 1, lon_idx[0] : lon_idx[-1] + 1]
-    if arr.ndim > 2:
-        arr = arr.squeeze()
-    arr = np.asarray(arr, dtype=np.float32)
-
-    return {
-        "shape": list(arr.shape),
-        "lat_min": float(lats[lat_idx[0]]),
-        "lat_max": float(lats[lat_idx[-1]]),
-        "lng_min": float(lons[lon_idx[0]]),
-        "lng_max": float(lons[lon_idx[-1]]),
-        # Werte als nested list; NaN → null für JSON-Konformität
-        "values": [
-            [None if np.isnan(v) else round(float(v), 2) for v in row]
-            for row in arr
-        ],
-    }
+    return ds[data_vars[0]].values.astype(np.float32).ravel()
 
 
-def write_layer_json(out_dir: Path, ts: datetime, param: str, grid: dict) -> Path:
-    """Schreibt eine Layer-JSON-Datei und liefert den Pfad zurück."""
-    out = {
+def build_regular_grid() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Baut das Ziel-Gitter (Lat absteigend von Nord→Süd, Lng aufsteigend West→Ost)
+    und liefert (lats_1d, lngs_1d, grid_lng_2d, grid_lat_2d).
+    """
+    lng_min, lat_min, lng_max, lat_max = CH_BBOX
+    lngs = np.arange(lng_min, lng_max + GRID_RES_DEG / 2, GRID_RES_DEG)
+    lats = np.arange(lat_max, lat_min - GRID_RES_DEG / 2, -GRID_RES_DEG)
+    gx, gy = np.meshgrid(lngs, lats)
+    return lats, lngs, gx, gy
+
+
+def regrid_to_array(
+    ch_lats: np.ndarray,
+    ch_lons: np.ndarray,
+    ch_vals: np.ndarray,
+    gx: np.ndarray,
+    gy: np.ndarray,
+) -> np.ndarray:
+    """Linear-Interpolation der Punkte auf das reguläre Gitter; Lücken = NaN."""
+    grid = griddata(
+        points=(ch_lons, ch_lats),
+        values=ch_vals,
+        xi=(gx, gy),
+        method="linear",
+        fill_value=np.nan,
+    )
+    return grid.astype(np.float32)
+
+
+def write_layer_json(
+    out_dir: Path,
+    ts: datetime,
+    param: str,
+    grid: np.ndarray,
+    lats_1d: np.ndarray,
+    lngs_1d: np.ndarray,
+) -> Path:
+    payload = {
         "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "param": param,
         "label": RELEVANT_PARAMS[param]["label"],
         "unit": RELEVANT_PARAMS[param]["unit"],
         "scale": RELEVANT_PARAMS[param]["scale"],
-        **grid,
+        "shape": [int(grid.shape[0]), int(grid.shape[1])],
+        "lat_max": float(lats_1d[0]),
+        "lat_min": float(lats_1d[-1]),
+        "lng_min": float(lngs_1d[0]),
+        "lng_max": float(lngs_1d[-1]),
+        "values": [
+            [None if np.isnan(v) else round(float(v), 2) for v in row]
+            for row in grid
+        ],
     }
     fname = f"{ts.strftime('%Y%m%dT%H%M')}_{param}.json"
     path = out_dir / fname
     with path.open("w", encoding="utf-8") as f:
-        json.dump(out, f, separators=(",", ":"))
+        json.dump(payload, f, separators=(",", ":"))
     return path
 
 
 def write_index(out_dir: Path, hours: list[datetime]) -> Path:
-    """Schreibt eine index.json mit allen verfügbaren Stunden + Parametern."""
     payload = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "bbox": list(CH_BBOX),
@@ -266,7 +334,6 @@ def write_index(out_dir: Path, hours: list[datetime]) -> Path:
 
 
 def upload_sftp(local_files: list[Path], remote_dir: str) -> bool:
-    """Lädt eine Liste lokaler Dateien per SFTP hoch."""
     import paramiko
 
     host = require_env("SFTP_HOST")
@@ -278,7 +345,6 @@ def upload_sftp(local_files: list[Path], remote_dir: str) -> bool:
     transport.connect(username=user, password=pwd)
     sftp = paramiko.SFTPClient.from_transport(transport)
     try:
-        # mkdir -p
         parts = remote_dir.strip("/").split("/")
         current = ""
         for p in parts:
@@ -298,6 +364,10 @@ def upload_sftp(local_files: list[Path], remote_dir: str) -> bool:
         transport.close()
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Main
+# ────────────────────────────────────────────────────────────────────────────
+
 def main():
     lookback = int(os.environ.get("LOOKBACK_HOURS", "24"))
     remote_dir = os.environ.get("SFTP_REMOTE_DIR", "/web-scripts/kenda-poc/data")
@@ -312,8 +382,34 @@ def main():
         out_dir = tmp / "out"
         out_dir.mkdir()
 
+        # 1) Mesh einmalig laden
+        log.info("Loading KENDA mesh (CLAT/CLON) …")
+        try:
+            clat, clon = load_mesh(tmp)
+        except Exception as e:
+            log.error("Mesh load failed: %s", e)
+            return 1
+        log.info("Mesh: %d cells total", clat.size)
+
+        # 2) Bbox-Mask auf Schweiz
+        lng_min, lat_min, lng_max, lat_max = CH_BBOX
+        mask = (clat >= lat_min) & (clat <= lat_max) & (clon >= lng_min) & (clon <= lng_max)
+        ch_lats = clat[mask]
+        ch_lons = clon[mask]
+        ch_indices = np.where(mask)[0]
+        log.info("CH-Bbox-Filter: %d / %d cells", ch_indices.size, clat.size)
+
+        if ch_indices.size < 100:
+            log.error("Too few cells inside bbox — check CLAT/CLON parsing")
+            return 1
+
+        # 3) Reguläres Ziel-Gitter
+        lats_1d, lngs_1d, gx, gy = build_regular_grid()
+        log.info("Target grid: %d × %d (lat × lng) at %g°", lats_1d.size, lngs_1d.size, GRID_RES_DEG)
+
+        # 4) Pro Item: download, mask, regrid, json
         success_files: list[Path] = []
-        hours_seen = set()
+        hours_seen: set[datetime] = set()
 
         for item in sorted(items, key=lambda x: (x.timestamp, x.param)):
             grib_path = tmp / f"{item.item_id}.grib2"
@@ -321,13 +417,22 @@ def main():
 
             if not download_grib(item.grib_url, grib_path):
                 continue
-            grid = grib_to_grid(grib_path, CH_BBOX)
-            if grid is None:
+            values_1d = read_values_1d(grib_path)
+            grib_path.unlink(missing_ok=True)
+            if values_1d is None:
                 continue
-            json_path = write_layer_json(out_dir, item.timestamp, item.param, grid)
+            if values_1d.size != clat.size:
+                log.error(
+                    "Cell count mismatch for %s: data=%d, mesh=%d",
+                    item.item_id, values_1d.size, clat.size,
+                )
+                continue
+
+            ch_vals = values_1d[ch_indices]
+            grid = regrid_to_array(ch_lats, ch_lons, ch_vals, gx, gy)
+            json_path = write_layer_json(out_dir, item.timestamp, item.param, grid, lats_1d, lngs_1d)
             success_files.append(json_path)
             hours_seen.add(item.timestamp)
-            grib_path.unlink(missing_ok=True)
 
         if not success_files:
             log.error("No successful conversions")
