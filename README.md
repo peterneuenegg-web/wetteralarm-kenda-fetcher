@@ -44,10 +44,16 @@ Temperatur sind im Skript schnell ergänzbar (siehe `RELEVANT_PARAMS`).
 
 Settings → Secrets and variables → Actions:
 
-- `SFTP_HOST` — z.B. `widget.wetteralarm.ch`
-- `SFTP_USER` — SFTP-Login auf Infomaniak
-- `SFTP_PASSWORD` — SFTP-Passwort
-- `SFTP_REMOTE_DIR` — z.B. `/web-scripts/kenda-poc/data`
+**Für die PoC-Karte (Stage-Demo):**
+- `SFTP_HOST`, `SFTP_USER`, `SFTP_PASSWORD`, `SFTP_REMOTE_DIR`
+
+**Für Stage-Ingest in die Schadensplattform:**
+- `STAGE_INGEST_URL` — `https://schaden.wetteralarm.ch/stage/api/kenda-ingest.php`
+- `STAGE_INGEST_TOKEN` — muss matchen mit `KENDA_INGEST_TOKEN` in `.env.stage`
+
+**Für Prod-Ingest (sobald Stage verifiziert ist):**
+- `PROD_INGEST_URL` — `https://schaden.wetteralarm.ch/api/kenda-ingest.php`
+- `PROD_INGEST_TOKEN` — muss matchen mit `KENDA_INGEST_TOKEN` in `.env.production`
 
 ### Frontend hochladen (einmalig)
 
@@ -95,3 +101,10 @@ langsam selbst auf.
 
 MIT für den Code dieses Repos. Die Daten selbst stehen unter CC-BY MeteoSchweiz
 — die Attribution `© MeteoSchweiz (CC-BY)` ist im Frontend-Footer hardcoded.
+
+## Beziehung zur Schadensplausibilisierung
+
+Dieser Worker ist Teil des Wetter-Alarm-Schadenstools. Die Daten landen über
+[api/kenda-ingest.php](https://github.com/wetteralarm/Schadensplausibilisierung)
+in einem Eigen-Archiv, das die 24-h-Rolling-Beschränkung der MeteoSchweiz-API
+überwindet. Details: `Doku/kenda-pipeline.md` im Schaden-Repo.

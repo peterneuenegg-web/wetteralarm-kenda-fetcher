@@ -59,38 +59,56 @@ COLLECTION_ASSETS_URL = (
 HORIZONTAL_CONSTANTS_ASSET = "horizontal_constants_kenda-ch1.grib2"
 
 RELEVANT_PARAMS = {
-    "vmax_10m": {
-        "label": "Wind-Böenspitze 10 m",
-        "unit": "m/s",
-        "scale": [0, 15, 35],
-    },
-    "tot_prec": {
-        "label": "Total Niederschlag (1 h)",
-        "unit": "mm",
-        "scale": [0, 5, 30],
-    },
-    "cape_ml": {
-        "label": "CAPE (Konvektion)",
-        "unit": "J/kg",
-        "scale": [0, 1000, 2500],
-    },
-    "dbz_cmax": {
-        "label": "Max Radar-Reflektivität",
-        "unit": "dBZ",
-        "scale": [0, 35, 55],
-    },
+    # Wind
+    "vmax_10m": {"label": "Wind-Böenspitze 10 m",     "unit": "m/s",  "scale": [0, 15, 35]},
+    "u_10m":    {"label": "Wind 10 m (Ost-Komp.)",    "unit": "m/s",  "scale": [-20, 0, 20]},
+    "v_10m":    {"label": "Wind 10 m (Nord-Komp.)",   "unit": "m/s",  "scale": [-20, 0, 20]},
+    # Niederschlag
+    "tot_prec": {"label": "Total Niederschlag (1 h)", "unit": "mm",   "scale": [0, 5, 30]},
+    "rain_gsp": {"label": "Regen (1 h)",              "unit": "mm",   "scale": [0, 5, 30]},
+    "snow_gsp": {"label": "Schnee-Niederschlag (1 h)","unit": "mm",   "scale": [0, 5, 30]},
+    "grau_gsp": {"label": "Graupel (1 h)",            "unit": "mm",   "scale": [0, 2, 10]},
+    # Konvektion / Radar
+    "cape_ml":  {"label": "CAPE (Konvektion)",        "unit": "J/kg", "scale": [0, 1000, 2500]},
+    "dbz_cmax": {"label": "Max Radar-Reflektivität",  "unit": "dBZ",  "scale": [0, 35, 55]},
+    # Temperatur
+    "t_2m":     {"label": "Temperatur 2 m",           "unit": "°C",   "scale": [-10, 10, 35]},
+    "tmax_2m":  {"label": "Tagesmax 2 m (1 h)",       "unit": "°C",   "scale": [-10, 15, 38]},
+    "tmin_2m":  {"label": "Tagesmin 2 m (1 h)",       "unit": "°C",   "scale": [-15, 5, 30]},
+    # Schnee
+    "h_snow":   {"label": "Schneehöhe",               "unit": "m",    "scale": [0, 0.5, 2]},
+    "snowlmt":  {"label": "Schneefallgrenze",         "unit": "m",    "scale": [0, 1500, 4000]},
 }
 
 # KENDA publiziert unterschiedlich, je nach Aggregationstyp:
-#  - Constant-Variablen (CAPE_ML, DBZ_CMAX) → lead=0 (Analyse)
-#  - Stündliche Aggregate (VMAX_10M = max/1h, TOT_PREC = sum/1h) → lead=1 (First Guess)
-# Wir akzeptieren pro Parameter genau den richtigen Lead.
+#  - Instant- und Constant-Variablen → lead=0 (Analyse)
+#  - Stündliche Aggregate (Min/Max/Sum über vorige Stunde) → lead=1 (First Guess)
+# Pro Parameter exakt den richtigen Lead akzeptieren — sonst kommen 404 im Frontend.
 PARAM_LEAD = {
+    # Aggregate über die Vorstunde
     "vmax_10m": 1,
     "tot_prec": 1,
+    "rain_gsp": 1,
+    "snow_gsp": 1,
+    "grau_gsp": 1,
+    "tmax_2m":  1,
+    "tmin_2m":  1,
+    # Constant / Instant
+    "u_10m":    0,
+    "v_10m":    0,
     "cape_ml":  0,
     "dbz_cmax": 0,
+    "t_2m":     0,
+    "h_snow":   0,
+    "snowlmt":  0,
 }
+
+# Konvertierungs-Helper: KENDA t_2m kommt in Kelvin, wir wollen °C im JSON.
+# Andere Parameter sind in den Einheiten, die wir oben deklariert haben.
+def post_process(param: str, arr: np.ndarray) -> np.ndarray:
+    if param in ("t_2m", "tmax_2m", "tmin_2m"):
+        return arr - 273.15
+    return arr
 
 CH_BBOX = (5.8, 45.7, 10.6, 47.9)  # lng_min, lat_min, lng_max, lat_max
 GRID_RES_DEG = 0.01                # ≈ 1.1 km bei 47°N
@@ -371,6 +389,64 @@ def write_index(out_dir: Path, hours: list[datetime], params_written: set[str]) 
     return path
 
 
+def post_to_schaden(local_files: list[Path]) -> bool:
+    """
+    POSTet jedes Layer-JSON ans Schaden-Ingest-Endpoint. Server speichert es
+    gzipped auf Disk und schreibt einen Eintrag in `kenda_frames`.
+    Idempotent — bereits ingestiertete (timestamp, parameter)-Paare werden
+    server-seitig überschrieben.
+
+    Env (optional, sonst skip):
+      INGEST_URL    — z.B. https://schaden.wetteralarm.ch/api/kenda-ingest.php
+      INGEST_TOKEN  — muss matchen mit KENDA_INGEST_TOKEN in .env
+      HEARTBEAT_URL — optional, wird nach erfolgreichem Lauf gepingt
+    """
+    url = os.environ.get("INGEST_URL", "").strip()
+    token = os.environ.get("INGEST_TOKEN", "").strip()
+    if not url or not token:
+        log.info("INGEST_URL/INGEST_TOKEN nicht gesetzt — Schaden-POST übersprungen")
+        return True
+
+    sent = 0
+    failed = 0
+    for f in local_files:
+        # index.json überspringen — der Schaden-Server baut seinen eigenen Index
+        if f.name == "index.json":
+            continue
+        try:
+            with f.open("rb") as fh:
+                r = requests.post(
+                    url,
+                    data=fh.read(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Ingest-Token": token,
+                        "X-Filename": f.name,
+                    },
+                    timeout=60,
+                )
+            if r.status_code in (200, 201):
+                sent += 1
+            else:
+                log.warning("POST %s → %d %s", f.name, r.status_code, r.text[:200])
+                failed += 1
+        except Exception as e:
+            log.warning("POST %s failed: %s", f.name, e)
+            failed += 1
+
+    log.info("Schaden-Ingest: %d sent, %d failed", sent, failed)
+
+    # Heartbeat ans Schaden-Monitoring
+    hb_url = os.environ.get("HEARTBEAT_URL", "").strip()
+    if hb_url and failed == 0:
+        try:
+            requests.get(hb_url, headers={"X-Ingest-Token": token}, timeout=15)
+        except Exception:
+            pass  # Heartbeat ist best-effort
+
+    return failed == 0
+
+
 def upload_sftp(local_files: list[Path], remote_dir: str) -> bool:
     import paramiko
 
@@ -505,6 +581,7 @@ def main():
 
             ch_vals = values_1d[ch_indices]
             grid = regrid_to_array(ch_lats, ch_lons, ch_vals, gx, gy)
+            grid = post_process(item.param, grid)
             json_path = write_layer_json(out_dir, item.timestamp, item.param, grid, lats_1d, lngs_1d)
             success_files.append(json_path)
             hours_seen.add(item.timestamp)
@@ -519,10 +596,17 @@ def main():
         success_files.append(index_path)
 
         log.info("Uploading %d files via SFTP", len(success_files))
+        sftp_ok = True
         try:
             upload_sftp(success_files, remote_dir)
         except Exception as e:
             log.error("SFTP upload failed: %s", e)
+            sftp_ok = False
+
+        # POST an Schaden-Ingest (zusätzlich zum SFTP-PoC)
+        ingest_ok = post_to_schaden(success_files)
+
+        if not sftp_ok and not ingest_ok:
             return 1
 
     log.info("Done")

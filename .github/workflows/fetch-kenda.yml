@@ -35,11 +35,31 @@ jobs:
       - name: Install python deps
         run: pip install -r requirements.txt
 
-      - name: Fetch + upload
+      - name: Fetch + upload (PoC SFTP + Stage Ingest)
         env:
           SFTP_HOST: ${{ secrets.SFTP_HOST }}
           SFTP_USER: ${{ secrets.SFTP_USER }}
           SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
           SFTP_REMOTE_DIR: ${{ secrets.SFTP_REMOTE_DIR }}
+          INGEST_URL: ${{ secrets.STAGE_INGEST_URL }}
+          INGEST_TOKEN: ${{ secrets.STAGE_INGEST_TOKEN }}
+          HEARTBEAT_URL: https://schaden.wetteralarm.ch/stage/api/external-heartbeat.php?job=fetch_kenda
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
+        run: python fetch_kenda.py
+
+      - name: Fetch + upload (Prod Ingest, parallel run)
+        # Prod-Ingest läuft als zweiter Durchgang, damit Stage und Prod
+        # voneinander unabhängig sind. SFTP zum PoC-Widget passiert dabei
+        # ein zweites Mal — idempotent.
+        if: env.PROD_INGEST_URL != ''
+        env:
+          PROD_INGEST_URL: ${{ secrets.PROD_INGEST_URL }}
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_USER: ${{ secrets.SFTP_USER }}
+          SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
+          SFTP_REMOTE_DIR: ${{ secrets.SFTP_REMOTE_DIR }}
+          INGEST_URL: ${{ secrets.PROD_INGEST_URL }}
+          INGEST_TOKEN: ${{ secrets.PROD_INGEST_TOKEN }}
+          HEARTBEAT_URL: https://schaden.wetteralarm.ch/api/external-heartbeat.php?job=fetch_kenda
           LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
         run: python fetch_kenda.py
