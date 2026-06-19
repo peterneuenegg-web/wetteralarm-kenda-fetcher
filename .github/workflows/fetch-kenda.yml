@@ -39,6 +39,23 @@ jobs:
       - name: Install python deps
         run: pip install -r requirements.txt
 
+      - name: Detect prod config
+        # Job-Output, damit der Prod-Step nur läuft wenn beide Secrets gesetzt
+        # sind. `secrets.*` in einem `if:` wird von GitHub auf null maskiert —
+        # deshalb der Umweg über einen Output-Step.
+        id: cfg
+        env:
+          PROD_URL: ${{ secrets.PROD_INGEST_URL }}
+          PROD_TOKEN: ${{ secrets.PROD_INGEST_TOKEN }}
+        run: |
+          if [ -n "$PROD_URL" ] && [ -n "$PROD_TOKEN" ]; then
+            echo "has_prod=true"  >> "$GITHUB_OUTPUT"
+            echo "Prod-Ingest ist konfiguriert"
+          else
+            echo "has_prod=false" >> "$GITHUB_OUTPUT"
+            echo "Prod-Ingest ist NICHT konfiguriert — Prod-Step wird übersprungen"
+          fi
+
       - name: Fetch + upload (PoC SFTP + Stage Ingest)
         env:
           SFTP_HOST: ${{ secrets.SFTP_HOST }}
@@ -51,13 +68,11 @@ jobs:
           LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
         run: python fetch_kenda.py
 
-      - name: Fetch + upload (Prod Ingest, parallel run)
-        # Prod-Ingest läuft als zweiter Durchgang, damit Stage und Prod
-        # voneinander unabhängig sind. SFTP zum PoC-Widget passiert dabei
-        # ein zweites Mal — idempotent.
-        if: env.PROD_INGEST_URL != ''
+      - name: Fetch + upload (Prod Ingest)
+        # Zweiter Worker-Lauf für Prod-Ingest. SFTP zum PoC-Widget passiert
+        # idempotent ein zweites Mal — harmlos.
+        if: steps.cfg.outputs.has_prod == 'true'
         env:
-          PROD_INGEST_URL: ${{ secrets.PROD_INGEST_URL }}
           SFTP_HOST: ${{ secrets.SFTP_HOST }}
           SFTP_USER: ${{ secrets.SFTP_USER }}
           SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
