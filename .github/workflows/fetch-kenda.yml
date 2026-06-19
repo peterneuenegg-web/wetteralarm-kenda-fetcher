@@ -5,15 +5,19 @@ env:
 
 on:
   schedule:
-    # Stündlich, 15 Min nach voller Stunde (KENDA publiziert i.d.R. ~30 Min nach
-    # Stundenende). GitHub-Cron ist best-effort; LOOKBACK_HOURS deckt Lücken ab.
-    - cron: "15 * * * *"
+    # Fallback: GitHub-Cron alle 30 Min — best-effort, kompensiert wenn der
+    # Schaden-Cron auf Infomaniak einmal nicht durchkommt.
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       lookback_hours:
-        description: "Wie viele Stunden zurück (Default 24)"
+        description: "Wie viele Stunden zurück (Default 4 bei Cron-Trigger, 24 für Backfill)"
         required: false
         default: "24"
+      triggered_by:
+        description: "Auslöser (manuell oder schaden-cron-<env>)"
+        required: false
+        default: "manual"
 
 jobs:
   fetch:
