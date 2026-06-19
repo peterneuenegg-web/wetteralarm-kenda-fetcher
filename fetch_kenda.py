@@ -33,6 +33,7 @@ import os
 import re
 import sys
 import tempfile
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,16 @@ import numpy as np
 import requests
 import xarray as xr
 from scipy.interpolate import griddata
+
+# KENDA-Daten-GRIBs verwenden gridType='unstructured_grid' und bringen keine
+# eingebetteten Lat/Lon mit — Koordinaten holen wir uns separat aus
+# horizontal_constants_kenda-ch1.grib2 (siehe load_mesh()). Die ecCodes-Warnung
+# ist deshalb erwartbar und harmlos; wir unterdrücken sie, damit das Log
+# sauber bleibt und echte Probleme klarer sichtbar werden.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*provides no latitudes/longitudes for gridType='unstructured_grid'.*",
+)
 
 logging.basicConfig(
     level=logging.INFO,
