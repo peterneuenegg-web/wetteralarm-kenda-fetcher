@@ -400,12 +400,47 @@ def write_index(out_dir: Path, hours: list[datetime], params_written: set[str]) 
     return path
 
 
+def _post_with_retry(url: str, body: bytes, headers: dict, max_attempts: int = 3) -> tuple[int | None, str]:
+    """
+    POST mit kurzem Exponential-Backoff (2/4/8 s) gegen transiente Netzwerk-
+    Aussetzer. Retry nur bei Netzwerk-Errors und 5xx-Antworten — 4xx (Token,
+    Format etc.) wird sofort als fatal markiert.
+
+    Returns: (status_code | None, error_or_body_snippet)
+    """
+    import time
+
+    last_err = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            r = requests.post(url, data=body, headers=headers, timeout=60)
+            if r.status_code in (200, 201):
+                return r.status_code, ""
+            if 400 <= r.status_code < 500:
+                # 4xx ist immer permanent — kein Retry, sofort raus
+                return r.status_code, r.text[:200]
+            # 5xx → Retry
+            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_err = str(e)[:200]
+        except Exception as e:
+            return None, f"unexpected: {e!s}"
+
+        if attempt < max_attempts:
+            time.sleep(2 ** attempt)  # 2s, 4s
+
+    return None, last_err
+
+
 def post_to_schaden(local_files: list[Path]) -> bool:
     """
     POSTet jedes Layer-JSON ans Schaden-Ingest-Endpoint. Server speichert es
     gzipped auf Disk und schreibt einen Eintrag in `kenda_frames`.
     Idempotent — bereits ingestiertete (timestamp, parameter)-Paare werden
     server-seitig überschrieben.
+
+    Bei transienten Fehlern (Connection/Timeout/5xx) wird bis zu 3× retried.
+    Permanente 4xx (Auth, Bad Request) brechen sofort ohne Retry ab.
 
     Env (optional, sonst skip):
       INGEST_URL    — z.B. https://schaden.wetteralarm.ch/api/kenda-ingest.php
@@ -424,36 +459,29 @@ def post_to_schaden(local_files: list[Path]) -> bool:
         # index.json überspringen — der Schaden-Server baut seinen eigenen Index
         if f.name == "index.json":
             continue
-        try:
-            with f.open("rb") as fh:
-                r = requests.post(
-                    url,
-                    data=fh.read(),
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-Ingest-Token": token,
-                        "X-Filename": f.name,
-                    },
-                    timeout=60,
-                )
-            if r.status_code in (200, 201):
-                sent += 1
-            else:
-                log.warning("POST %s → %d %s", f.name, r.status_code, r.text[:200])
-                failed += 1
-        except Exception as e:
-            log.warning("POST %s failed: %s", f.name, e)
+        with f.open("rb") as fh:
+            body = fh.read()
+        headers = {
+            "Content-Type": "application/json",
+            "X-Ingest-Token": token,
+            "X-Filename": f.name,
+        }
+        status, err = _post_with_retry(url, body, headers)
+        if status in (200, 201):
+            sent += 1
+        else:
+            log.warning("POST %s failed (final): status=%s err=%s", f.name, status, err)
             failed += 1
 
     log.info("Schaden-Ingest: %d sent, %d failed", sent, failed)
 
-    # Heartbeat ans Schaden-Monitoring
+    # Heartbeat ans Schaden-Monitoring (best-effort, auch mit ein paar Failures)
     hb_url = os.environ.get("HEARTBEAT_URL", "").strip()
-    if hb_url and failed == 0:
+    if hb_url and sent > 0:
         try:
             requests.get(hb_url, headers={"X-Ingest-Token": token}, timeout=15)
         except Exception:
-            pass  # Heartbeat ist best-effort
+            pass
 
     return failed == 0
 
