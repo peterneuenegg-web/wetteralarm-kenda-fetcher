@@ -56,27 +56,19 @@ jobs:
             echo "Prod-Ingest ist NICHT konfiguriert — Prod-Step wird übersprungen"
           fi
 
-      - name: Fetch + upload (PoC SFTP + Stage Ingest)
+      - name: Fetch + ingest Stage
         env:
-          SFTP_HOST: ${{ secrets.SFTP_HOST }}
-          SFTP_USER: ${{ secrets.SFTP_USER }}
-          SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
-          SFTP_REMOTE_DIR: ${{ secrets.SFTP_REMOTE_DIR }}
           INGEST_URL: ${{ secrets.STAGE_INGEST_URL }}
           INGEST_TOKEN: ${{ secrets.STAGE_INGEST_TOKEN }}
           HEARTBEAT_URL: https://schaden.wetteralarm.ch/stage/api/external-heartbeat.php?job=fetch_kenda
           LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
         run: python fetch_kenda.py
 
-      - name: Fetch + upload (Prod Ingest)
-        # Zweiter Worker-Lauf für Prod-Ingest. SFTP zum PoC-Widget passiert
-        # idempotent ein zweites Mal — harmlos.
+      - name: Fetch + ingest Prod
+        # Zweiter Worker-Lauf für Prod-Ingest, läuft nur wenn die Prod-Secrets
+        # gesetzt sind (Output aus dem Detect-Step).
         if: steps.cfg.outputs.has_prod == 'true'
         env:
-          SFTP_HOST: ${{ secrets.SFTP_HOST }}
-          SFTP_USER: ${{ secrets.SFTP_USER }}
-          SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
-          SFTP_REMOTE_DIR: ${{ secrets.SFTP_REMOTE_DIR }}
           INGEST_URL: ${{ secrets.PROD_INGEST_URL }}
           INGEST_TOKEN: ${{ secrets.PROD_INGEST_TOKEN }}
           HEARTBEAT_URL: https://schaden.wetteralarm.ch/api/external-heartbeat.php?job=fetch_kenda

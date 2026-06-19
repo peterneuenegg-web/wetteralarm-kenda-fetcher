@@ -634,15 +634,21 @@ def main():
         index_path = write_index(out_dir, list(hours_seen), params_written)
         success_files.append(index_path)
 
-        log.info("Uploading %d files via SFTP", len(success_files))
+        # SFTP-Upload zur PoC-Karte ist optional und wird nur ausgeführt, wenn
+        # SFTP_HOST gesetzt ist. Standard ab Phase 2 (Schaden-Karten-Integration):
+        # KEIN SFTP mehr — die Daten gehen direkt in die Schaden-Plattform.
         sftp_ok = True
-        try:
-            upload_sftp(success_files, remote_dir)
-        except Exception as e:
-            log.error("SFTP upload failed: %s", e)
-            sftp_ok = False
+        if os.environ.get("SFTP_HOST", "").strip():
+            log.info("Uploading %d files via SFTP", len(success_files))
+            try:
+                upload_sftp(success_files, remote_dir)
+            except Exception as e:
+                log.error("SFTP upload failed: %s", e)
+                sftp_ok = False
+        else:
+            log.info("SFTP_HOST nicht gesetzt — PoC-Upload übersprungen")
 
-        # POST an Schaden-Ingest (zusätzlich zum SFTP-PoC)
+        # POST an Schaden-Ingest
         ingest_ok = post_to_schaden(success_files)
 
         if not sftp_ok and not ingest_ok:
