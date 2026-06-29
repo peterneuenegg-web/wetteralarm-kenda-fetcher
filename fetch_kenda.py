@@ -308,21 +308,38 @@ def download_grib(url: str, dest: Path) -> bool:
 
 
 def read_values_1d(grib_path: Path) -> np.ndarray | None:
-    """Liest das 1D-Wertearray (eine Zahl pro Mesh-Zelle) aus dem Daten-GRIB."""
+    """Liest das 1D-Wertearray (eine Zahl pro Mesh-Zelle) aus dem Daten-GRIB.
+
+    Verwendet die low-level eccodes.codes_*-API direkt statt cfgrib/xarray:
+    xr.open_dataset(engine="cfgrib") segfaultet bei ICON-CH1's
+    unstructured_grid, weil cfgrib intern versucht, lat/lon-Koordinaten aus
+    dem GRIB zu lesen — ecCodes hat aber für unstructured_grid keine
+    (siehe Warning "ecCodes provides no latitudes/longitudes for
+    gridType='unstructured_grid'"). Der nachgelagerte Native-Zugriff auf
+    die nicht-vorhandenen Koords crasht den ganzen Process.
+
+    Das values-Array (eine Zahl pro Mesh-Zelle) ist immer vorhanden und
+    direkt via codes_get_array(gid, "values") lesbar — analog zum
+    Mesh-Loader in read_mesh().
+    """
+    import eccodes  # bringt cfgrib mit, gleicher Pattern wie read_mesh()
     try:
-        ds = xr.open_dataset(
-            grib_path,
-            engine="cfgrib",
-            backend_kwargs={"indexpath": ""},
-        )
+        with grib_path.open("rb") as f:
+            gid = eccodes.codes_grib_new_from_file(f)
+            if gid is None:
+                log.error("No GRIB message in %s", grib_path.name)
+                return None
+            try:
+                values = np.asarray(
+                    eccodes.codes_get_array(gid, "values"),
+                    dtype=np.float32,
+                )
+            finally:
+                eccodes.codes_release(gid)
     except Exception as e:
-        log.error("Open GRIB failed: %s", e)
+        log.error("Open/read GRIB failed (%s): %s", grib_path.name, e)
         return None
-    data_vars = list(ds.data_vars)
-    if not data_vars:
-        log.error("No data variables in %s", grib_path.name)
-        return None
-    return ds[data_vars[0]].values.astype(np.float32).ravel()
+    return values.ravel()
 
 
 def build_regular_grid() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
