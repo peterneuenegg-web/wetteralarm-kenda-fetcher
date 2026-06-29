@@ -21,7 +21,12 @@ on:
 
 jobs:
   fetch:
-    runs-on: ubuntu-latest
+    # WICHTIG: auf ubuntu-22.04 pinnen statt ubuntu-latest. Letzteres ist seit
+    # ~Mitte 2026 ubuntu-24.04. Dort wurde libeccodes durch die libc-time64-
+    # Migration zu `libeccodes2t64` umbenannt — der Python-Wrapper `eccodes`
+    # findet die native Library dann uneindeutig, was beim ersten GRIB-Decode
+    # mit unstructured_grid (ICON-CH1-T-Mesh) zu Segfault führt.
+    runs-on: ubuntu-22.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -32,9 +37,11 @@ jobs:
           cache: "pip"
 
       - name: Install system deps (eccodes)
+        # libeccodes-tools liefert die Definition-Files mit, libeccodes-dev die
+        # Header — beides hilft findlibs, die richtige Variante zu finden.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libeccodes0
+          sudo apt-get install -y libeccodes0 libeccodes-tools libeccodes-dev
 
       - name: Install python deps
         run: pip install -r requirements.txt
