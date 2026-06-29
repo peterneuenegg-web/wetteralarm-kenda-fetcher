@@ -27,7 +27,10 @@ jobs:
     # findet die native Library dann uneindeutig, was beim ersten GRIB-Decode
     # mit unstructured_grid (ICON-CH1-T-Mesh) zu Segfault führt.
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    # 24h-Backfill mit Stage+Prod-Doppel-Ingest braucht im Worst-Case ~28 Min
+    # (336 Items × ~2.5 s × 2 Targets). 50 Min Puffer schützt vor Netzwerk-Lag
+    # und manuellen Backfills mit höherem lookback_hours.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +71,11 @@ jobs:
           INGEST_URL: ${{ secrets.STAGE_INGEST_URL }}
           INGEST_TOKEN: ${{ secrets.STAGE_INGEST_TOKEN }}
           HEARTBEAT_URL: https://schaden.wetteralarm.ch/stage/api/external-heartbeat.php?job=fetch_kenda
-          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
+          # workflow_dispatch-Input hat Vorrang. Cron-Trigger (ohne Input)
+          # fällt auf 4h zurück — damit der 30-Min-Cron-Run zügig durch ist.
+          # Manuelle Backfills nutzen das `Run workflow`-Formular mit
+          # lookback_hours=24 (Default im Input) oder höher.
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '4' }}
         run: python fetch_kenda.py
 
       - name: Fetch + ingest Prod
@@ -79,5 +86,5 @@ jobs:
           INGEST_URL: ${{ secrets.PROD_INGEST_URL }}
           INGEST_TOKEN: ${{ secrets.PROD_INGEST_TOKEN }}
           HEARTBEAT_URL: https://schaden.wetteralarm.ch/api/external-heartbeat.php?job=fetch_kenda
-          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '4' }}
         run: python fetch_kenda.py
