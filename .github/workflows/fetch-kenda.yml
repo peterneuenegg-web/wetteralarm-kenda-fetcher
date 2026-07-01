@@ -5,17 +5,13 @@ env:
 
 on:
   schedule:
-    # Standard-Poll alle 30 Min mit 6h Lookback — deckt die üblichen
-    # Assimilations-Präzisierungen ab (First Guess → Analysis stabilisiert
-    # meist innerhalb 1-2h). Best-effort, kompensiert wenn der Schaden-Cron
-    # auf Infomaniak einmal nicht durchkommt.
+    # Fallback: GitHub-Cron alle 30 Min mit 6h Lookback — best-effort,
+    # kompensiert wenn der Schaden-Cron auf Infomaniak einmal nicht durchkommt.
+    # Der Extended-Backfill mit 24h Lookback (für späte KENDA-Assimilations-
+    # Präzisierungen) wird NICHT über GitHub-Schedule gemacht, weil zu
+    # unzuverlässig — stattdessen 2x täglich vom Infomaniak-Cron via
+    # trigger_kenda_backfill.php (verlässlicher).
     - cron: "*/30 * * * *"
-    # Extended-Backfill 2x täglich (03:17 und 15:17 UTC = 05:17 und 17:17
-    # CEST) mit 24h Lookback — holt späte KENDA-Analyse-Iterationen, die
-    # MeteoSchweiz nach den ersten 6h noch macht. 12h Abstand deckt Vor-
-    # und Nachtag-Zyklen ab. Minute 17 gewählt damit sich der Extended-
-    # Trigger nicht mit dem `*/30`-Standard-Poll überlappt.
-    - cron: "17 3,15 * * *"
   workflow_dispatch:
     inputs:
       lookback_hours:
@@ -83,10 +79,10 @@ jobs:
           # fällt auf 4h zurück — damit der 30-Min-Cron-Run zügig durch ist.
           # Manuelle Backfills nutzen das `Run workflow`-Formular mit
           # lookback_hours=24 (Default im Input) oder höher.
-          # Auswahl-Reihenfolge: manueller Input > Extended-Backfill (24h)
-          # > Standard-Poll (6h). `github.event.schedule` liefert bei Cron-
-          # Triggern die konkrete Cron-Expression, damit unterscheidbar.
-          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || (github.event.schedule == '17 3,15 * * *' && '24' || '6') }}
+          # Manueller Input hat Vorrang (24h Default für Backfills), Cron-
+          # Trigger nutzen 6h. Der Schaden-Cron (Infomaniak) dispatcht mit
+          # explizitem Input: stündlich 6h, 2x/Tag 24h.
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '6' }}
         run: python fetch_kenda.py
 
       - name: Fetch + ingest Prod
@@ -97,8 +93,8 @@ jobs:
           INGEST_URL: ${{ secrets.PROD_INGEST_URL }}
           INGEST_TOKEN: ${{ secrets.PROD_INGEST_TOKEN }}
           HEARTBEAT_URL: https://schaden.wetteralarm.ch/api/external-heartbeat.php?job=fetch_kenda
-          # Auswahl-Reihenfolge: manueller Input > Extended-Backfill (24h)
-          # > Standard-Poll (6h). `github.event.schedule` liefert bei Cron-
-          # Triggern die konkrete Cron-Expression, damit unterscheidbar.
-          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || (github.event.schedule == '17 3,15 * * *' && '24' || '6') }}
+          # Manueller Input hat Vorrang (24h Default für Backfills), Cron-
+          # Trigger nutzen 6h. Der Schaden-Cron (Infomaniak) dispatcht mit
+          # explizitem Input: stündlich 6h, 2x/Tag 24h.
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '6' }}
         run: python fetch_kenda.py
